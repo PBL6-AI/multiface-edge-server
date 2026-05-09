@@ -126,6 +126,8 @@ class RtspPublisher:
             camera_binary,
             "--inline",
             "--nopreview",
+            "--timeout",
+            "0",
             "--width",
             str(self._config.frame_width),
             "--height",
