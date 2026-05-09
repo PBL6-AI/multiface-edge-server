@@ -148,6 +148,8 @@ class RtspPublisher:
             "copy",
             "-f",
             "rtsp",
+            "-rtsp_transport",
+            "tcp",
             stream_url,
         ]
 
