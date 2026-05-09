@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 from edge_server.app import app, camera_edge_service, config
 
 
