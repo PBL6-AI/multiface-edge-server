@@ -1,0 +1,16 @@
+[Unit]
+Description=Multiface Raspberry Pi Edge Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/raspberrypi/apps/multiface-edge-server
+EnvironmentFile=/home/raspberrypi/apps/multiface-edge-server/.env
+ExecStart=/home/raspberrypi/apps/multiface-edge-server/.venv/bin/python /home/raspberrypi/apps/multiface-edge-server/run_edge_server.py
+Restart=always
+RestartSec=5
+User=raspberrypi
+
+[Install]
+WantedBy=multi-user.target

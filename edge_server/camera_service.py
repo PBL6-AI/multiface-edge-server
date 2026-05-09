@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from threading import Event, Lock, Thread
+from threading import Event, RLock, Thread
 from typing import Optional
 
 from .backend_client import BackendClient
@@ -15,11 +15,13 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EdgeRuntimeState:
+    registration_succeeded: bool = False
     is_running: bool = False
     session_id: Optional[int] = None
     camera_id: Optional[str] = None
     stream_url: Optional[str] = None
     fps: Optional[int] = None
+    status: str = "idle"
     last_error: Optional[str] = None
     last_started_at: Optional[str] = None
 
@@ -29,10 +31,23 @@ class CameraEdgeService:
         self._config = config
         self._backend_client = backend_client
         self._publisher = RtspPublisher(config)
-        self._lock = Lock()
+        self._lock = RLock()
         self._heartbeat_stop = Event()
         self._heartbeat_thread: Optional[Thread] = None
-        self._state = EdgeRuntimeState(camera_id=config.camera_id, fps=config.target_fps)
+        self._state = EdgeRuntimeState(
+            camera_id=config.camera_id,
+            fps=config.target_fps,
+        )
+
+    def preflight_check(self) -> dict:
+        logger.info("Running edge preflight checks...")
+        self._backend_client.check_connectivity()
+        publisher_info = self._publisher.preflight_check()
+        logger.info("Edge preflight checks completed successfully.")
+        return {
+            "backendUrl": self._config.backend_url,
+            **publisher_info,
+        }
 
     def register(self) -> None:
         payload = {
@@ -46,9 +61,19 @@ class CameraEdgeService:
                 "publisher": "mediamtx",
                 "targetFps": self._config.target_fps,
                 "resolution": f"{self._config.frame_width}x{self._config.frame_height}",
+                "cameraBinary": self._publisher.camera_binary
+                or self._config.camera_probe_binary
+                or self._config.rpicam_binary
+                or self._config.libcamera_binary,
             },
         }
         self._backend_client.register_device(payload)
+        with self._lock:
+            self._state.registration_succeeded = True
+            self._state.status = "online"
+            self._state.last_error = None
+        self._ensure_heartbeat()
+        self._send_heartbeat(mode="register")
 
     def start(self, session_id: int, camera_id: str | None = None) -> dict:
         with self._lock:
@@ -64,9 +89,11 @@ class CameraEdgeService:
                 self._state.session_id = session_id
                 self._state.camera_id = camera_id or self._config.camera_id
                 self._state.stream_url = stream_url
+                self._state.status = "running"
                 self._state.last_started_at = datetime.now(timezone.utc).isoformat()
                 self._state.last_error = None
                 self._ensure_heartbeat()
+                self._send_heartbeat(mode="running")
                 return {
                     "status": "started",
                     "streamUrl": stream_url,
@@ -75,6 +102,7 @@ class CameraEdgeService:
                 }
             except Exception as exc:
                 self._state.last_error = str(exc)
+                self._state.status = "error"
                 raise
 
     def stop(self, session_id: int) -> dict:
@@ -88,13 +116,18 @@ class CameraEdgeService:
             self._state.is_running = False
             self._state.session_id = None
             self._state.stream_url = None
-            self._heartbeat_stop.set()
+            self._state.status = (
+                "online" if self._state.registration_succeeded else "idle"
+            )
+            self._state.last_error = None
+            self._ensure_heartbeat()
+            self._send_heartbeat(mode="idle")
             return {"status": "stopped", "sessionId": session_id}
 
     def status(self) -> dict:
         with self._lock:
             return {
-                "status": "running" if self._state.is_running else "idle",
+                "status": self._state.status,
                 "is_running": self._state.is_running,
                 "sessionId": self._state.session_id,
                 "cameraId": self._state.camera_id,
@@ -119,18 +152,33 @@ class CameraEdgeService:
     def _heartbeat_loop(self) -> None:
         while not self._heartbeat_stop.wait(self._config.heartbeat_interval_seconds):
             try:
-                snapshot = self.status()
-                self._backend_client.send_heartbeat(
-                    {
-                        "deviceCode": self._config.device_code,
-                        "status": "online" if snapshot["is_running"] or not snapshot["lastError"] else "error",
-                        "activeSessionId": snapshot["sessionId"],
-                        "streamUrl": snapshot["streamUrl"],
-                        "metadata": {
-                            "lastError": snapshot["lastError"],
-                            "fps": snapshot["fps"],
-                        },
-                    }
-                )
+                self._send_heartbeat(mode="periodic")
             except Exception as exc:
+                with self._lock:
+                    self._state.last_error = str(exc)
+                    self._state.status = "error"
                 logger.warning("Failed to send heartbeat: %s", exc)
+
+    def _send_heartbeat(self, mode: str) -> None:
+        snapshot = self.status()
+        heartbeat_status = "running" if snapshot["is_running"] else "online"
+        self._backend_client.send_heartbeat(
+            {
+                "deviceCode": self._config.device_code,
+                "status": heartbeat_status,
+                "activeSessionId": snapshot["sessionId"],
+                "streamUrl": snapshot["streamUrl"],
+                "metadata": {
+                    "mode": mode,
+                    "lastError": snapshot["lastError"],
+                    "fps": snapshot["fps"],
+                    "cameraBinary": self._publisher.camera_binary
+                    or self._config.camera_probe_binary
+                    or self._config.rpicam_binary
+                    or self._config.libcamera_binary,
+                },
+            }
+        )
+        with self._lock:
+            self._state.status = "running" if self._state.is_running else "online"
+            self._state.last_error = None

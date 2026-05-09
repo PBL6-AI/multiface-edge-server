@@ -3,17 +3,25 @@ from __future__ import annotations
 import atexit
 import logging
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 
 from .backend_client import BackendClient
 from .camera_service import CameraEdgeService
 from .config import EdgeServerConfig
 
+load_dotenv()
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 config = EdgeServerConfig()
-backend_client = BackendClient(config.backend_url, config.edge_token)
+backend_client = BackendClient(
+    config.backend_url,
+    config.edge_token,
+    retry_attempts=config.backend_retry_attempts,
+    retry_delay_seconds=config.backend_retry_delay_seconds,
+)
 camera_edge_service = CameraEdgeService(config, backend_client)
 
 
@@ -27,6 +35,7 @@ def create_app() -> Flask:
                 "status": "ok",
                 "deviceCode": config.device_code,
                 "cameraId": config.camera_id,
+                "runtime": camera_edge_service.status(),
             }
         )
 
@@ -75,5 +84,7 @@ def _shutdown():
 
 
 if __name__ == "__main__":
+    preflight = camera_edge_service.preflight_check()
+    logger.info("Edge preflight result: %s", preflight)
     camera_edge_service.register()
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=config.port)

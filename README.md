@@ -8,26 +8,43 @@ It does **not** run face recognition inference.
 
 Responsibilities:
 
-- open ArduCam IMX519 through `libcamera-vid`
+- open ArduCam or Raspberry Pi camera through `libcamera-vid` or `rpicam-vid`
 - publish RTSP through `mediamtx`
 - expose control endpoints for backend
-- send heartbeat to backend
+- register itself and keep heartbeat alive, even while idle
 
-## Files
+## Runtime behavior
 
-- [edge_server/app.py](/D:/H-Coding/PBL5/multiface-attendace-for-classroom/edge_server/app.py)
-- [edge_server/camera_service.py](/D:/H-Coding/PBL5/multiface-attendace-for-classroom/edge_server/camera_service.py)
-- [edge_server/rtsp_publisher.py](/D:/H-Coding/PBL5/multiface-attendace-for-classroom/edge_server/rtsp_publisher.py)
-- [edge_server/backend_client.py](/D:/H-Coding/PBL5/multiface-attendace-for-classroom/edge_server/backend_client.py)
-- [run_edge_server.py](/D:/H-Coding/PBL5/multiface-attendace-for-classroom/run_edge_server.py)
+On startup the service now:
 
-## Install
+1. checks backend reachability
+2. verifies required binaries exist
+3. probes the camera with `rpicam-still --list-cameras` or `libcamera-still --list-cameras`
+4. registers the edge device to backend
+5. sends heartbeat immediately and continues heartbeat while idle
+
+This makes the backend see the Pi as `online` before the teacher starts an attendance session.
+
+## Key files
+
+- [edge_server/app.py](/D:/H-Coding/PBL5/multiface-edge-server/edge_server/app.py)
+- [edge_server/camera_service.py](/D:/H-Coding/PBL5/multiface-edge-server/edge_server/camera_service.py)
+- [edge_server/rtsp_publisher.py](/D:/H-Coding/PBL5/multiface-edge-server/edge_server/rtsp_publisher.py)
+- [edge_server/backend_client.py](/D:/H-Coding/PBL5/multiface-edge-server/edge_server/backend_client.py)
+- [run_edge_server.py](/D:/H-Coding/PBL5/multiface-edge-server/run_edge_server.py)
+- [deploy/raspberry-pi/README.md](/D:/H-Coding/PBL5/multiface-edge-server/deploy/raspberry-pi/README.md)
+
+## Python install
 
 ```bash
-pip install -r requirements-edge.txt
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ## Environment
+
+Start from `.env.example`.
 
 ```env
 BACKEND_URL=http://backend-server:3000
@@ -42,18 +59,33 @@ DEFAULT_STREAM_PATH=attendance
 MEDIAMTX_BINARY=mediamtx
 MEDIAMTX_CONFIG=
 LIBCAMERA_BINARY=libcamera-vid
+RPICAM_BINARY=rpicam-vid
+CAMERA_PROBE_BINARY=
 FFMPEG_BINARY=ffmpeg
 FRAME_WIDTH=1280
 FRAME_HEIGHT=720
 TARGET_FPS=15
+STARTUP_PROBE_TIMEOUT_SECONDS=5
+PROCESS_START_GRACE_SECONDS=2
+PORT=5000
 HEARTBEAT_INTERVAL_SECONDS=15
+BACKEND_RETRY_ATTEMPTS=5
+BACKEND_RETRY_DELAY_SECONDS=2
 ```
 
-## Run
+Notes:
+
+- `CONTROL_BASE_URL` must be the HTTP URL the backend can call on the Pi.
+- `STREAM_BASE_URL` must be the RTSP URL the AI service can pull from.
+- Leave `CAMERA_PROBE_BINARY` empty unless your Pi uses a non-standard camera probe command.
+
+## Run manually
 
 ```bash
 python run_edge_server.py
 ```
+
+If startup passes, the logs will print the preflight result and the device will register itself immediately.
 
 ## Endpoints
 
@@ -62,23 +94,36 @@ python run_edge_server.py
 - `POST /attendance/stop`
 - `GET /attendance/status`
 
-## Example start request
+`GET /attendance/status` returns:
 
 ```json
 {
-  "sessionId": 91,
-  "sourceDeviceId": "pi-room-a-01",
-  "cameraId": "cam-imx519-01"
-}
-```
-
-## Example response
-
-```json
-{
-  "status": "started",
-  "streamUrl": "rtsp://192.168.1.50:8554/pi-room-a-01/session-91",
+  "status": "online",
+  "is_running": false,
+  "sessionId": null,
   "cameraId": "cam-imx519-01",
-  "sessionId": 91
+  "streamUrl": null,
+  "fps": 15,
+  "lastError": null,
+  "lastStartedAt": null
 }
 ```
+
+## Debug checklist
+
+- Check health locally on the Pi:
+  - `curl http://localhost:5000/health`
+- Check service logs:
+  - `journalctl -u multiface-edge -f`
+- Check camera:
+  - `rpicam-still --list-cameras`
+  - `libcamera-still --list-cameras`
+- Check manual start from laptop on the same LAN:
+  - `curl -X POST http://<pi-ip>:5000/attendance/start -H "content-type: application/json" -d '{"sessionId":91,"cameraId":"cam-imx519-01"}'`
+
+## Raspberry Pi deployment
+
+Use the runbook here:
+
+- [deploy/raspberry-pi/README.md](/D:/H-Coding/PBL5/multiface-edge-server/deploy/raspberry-pi/README.md)
+- [deploy/raspberry-pi/multiface-edge.service](/D:/H-Coding/PBL5/multiface-edge-server/deploy/raspberry-pi/multiface-edge.service)
