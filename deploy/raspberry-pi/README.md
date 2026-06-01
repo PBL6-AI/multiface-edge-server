@@ -79,6 +79,7 @@ CAMERA_ID=cam-imx519-01
 CONTROL_BASE_URL=http://<pi-ip>:5000
 STREAM_BASE_URL=rtsp://<pi-ip>:8554
 DEFAULT_STREAM_PATH=attendance
+RECORDINGS_DIR=recordings
 MEDIAMTX_BINARY=mediamtx
 MEDIAMTX_CONFIG=
 LIBCAMERA_BINARY=libcamera-vid
@@ -197,6 +198,7 @@ curl -X POST http://<pi-ip>:5000/attendance/stop \
 - backend can create a session with `pi-room-a-01`
 - edge returns a valid RTSP `streamUrl`
 - AI service can open the stream
+- edge can start and stop a recording, and returns a local `.mp4` file path
 - frontend live monitor shows:
   - `Edge online`
   - `Stream running`

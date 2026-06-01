@@ -4,7 +4,7 @@ import atexit
 import logging
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 
 from .backend_client import BackendClient
 from .camera_service import CameraEdgeService
@@ -71,6 +71,48 @@ def create_app() -> Flask:
     @app.get("/attendance/status")
     def attendance_status():
         return jsonify(camera_edge_service.status()), 200
+
+    @app.post("/recording/start")
+    def start_recording():
+        payload = request.get_json(force=True, silent=False) or {}
+        recording_id = payload.get("recordingId")
+        if recording_id is None and payload.get("sessionId") is not None:
+            recording_id = f"session-{payload['sessionId']}"
+
+        try:
+            result = camera_edge_service.start_recording(
+                recording_id=recording_id,
+                file_name=payload.get("fileName"),
+            )
+            return jsonify(result), 200
+        except Exception as exc:
+            logger.exception("Failed to start camera recording")
+            return jsonify({"message": str(exc)}), 500
+
+    @app.post("/recording/stop")
+    @app.post("/recording/end")
+    def stop_recording():
+        payload = request.get_json(force=True, silent=True) or {}
+        try:
+            result = camera_edge_service.stop_recording(
+                recording_id=payload.get("recordingId")
+            )
+            return jsonify(result), 200
+        except Exception as exc:
+            logger.exception("Failed to stop camera recording")
+            return jsonify({"message": str(exc)}), 500
+
+    @app.get("/recording/status")
+    def recording_status():
+        return jsonify(camera_edge_service.recording_status()), 200
+
+    @app.get("/recording/files/<path:file_name>")
+    def download_recording(file_name: str):
+        return send_from_directory(
+            config.recordings_dir,
+            file_name,
+            as_attachment=True,
+        )
 
     return app
 

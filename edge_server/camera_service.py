@@ -9,6 +9,7 @@ from typing import Optional
 from .backend_client import BackendClient
 from .config import EdgeServerConfig
 from .rtsp_publisher import RtspPublisher
+from .video_recorder import VideoRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,11 @@ class EdgeRuntimeState:
     status: str = "idle"
     last_error: Optional[str] = None
     last_started_at: Optional[str] = None
+    is_recording: bool = False
+    recording_id: Optional[str] = None
+    recording_file_path: Optional[str] = None
+    recording_source: Optional[str] = None
+    recording_started_at: Optional[str] = None
 
 
 class CameraEdgeService:
@@ -31,6 +37,7 @@ class CameraEdgeService:
         self._config = config
         self._backend_client = backend_client
         self._publisher = RtspPublisher(config)
+        self._recorder = VideoRecorder(config)
         self._lock = RLock()
         self._heartbeat_stop = Event()
         self._heartbeat_thread: Optional[Thread] = None
@@ -135,10 +142,72 @@ class CameraEdgeService:
                 "fps": self._state.fps,
                 "lastError": self._state.last_error,
                 "lastStartedAt": self._state.last_started_at,
+                "recording": self.recording_status(),
             }
+
+    def start_recording(
+        self,
+        recording_id: str | None = None,
+        file_name: str | None = None,
+    ) -> dict:
+        with self._lock:
+            try:
+                source_url = self._state.stream_url if self._state.is_running else None
+                result = self._recorder.start(
+                    recording_id=recording_id,
+                    source_url=source_url,
+                    file_name=file_name,
+                )
+                self._state.is_recording = result["isRecording"]
+                self._state.recording_id = result["recordingId"]
+                self._state.recording_file_path = result["filePath"]
+                self._state.recording_source = result["source"]
+                self._state.recording_started_at = result["startedAt"]
+                self._state.last_error = None
+                if not self._state.is_running:
+                    self._state.status = "recording"
+                self._ensure_heartbeat()
+                self._send_heartbeat(mode="recording")
+                return result
+            except Exception as exc:
+                self._state.last_error = str(exc)
+                self._state.status = "error"
+                raise
+
+    def stop_recording(self, recording_id: str | None = None) -> dict:
+        with self._lock:
+            result = self._recorder.stop(recording_id=recording_id)
+            self._state.is_recording = False
+            self._state.recording_id = None
+            self._state.recording_file_path = None
+            self._state.recording_source = None
+            self._state.recording_started_at = None
+            self._state.status = (
+                "running"
+                if self._state.is_running
+                else "online"
+                if self._state.registration_succeeded
+                else "idle"
+            )
+            self._state.last_error = None
+            self._ensure_heartbeat()
+            self._send_heartbeat(mode="recording_stopped")
+            return result
+
+    def recording_status(self) -> dict:
+        recorder_status = self._recorder.status()
+        return {
+            **recorder_status,
+            "recordingId": self._state.recording_id or recorder_status["recordingId"],
+            "filePath": self._state.recording_file_path or recorder_status["filePath"],
+            "source": self._state.recording_source or recorder_status["source"],
+            "startedAt": self._state.recording_started_at
+            or recorder_status["startedAt"],
+        }
 
     def shutdown(self) -> None:
         self._heartbeat_stop.set()
+        self._recorder.stop()
         self._publisher.stop_all()
 
     def _ensure_heartbeat(self) -> None:
@@ -172,7 +241,9 @@ class CameraEdgeService:
                     "mode": mode,
                     "lastError": snapshot["lastError"],
                     "fps": snapshot["fps"],
+                    "recording": snapshot["recording"],
                     "cameraBinary": self._publisher.camera_binary
+                    or self._recorder.camera_binary
                     or self._config.camera_probe_binary
                     or self._config.rpicam_binary
                     or self._config.libcamera_binary,
@@ -180,5 +251,11 @@ class CameraEdgeService:
             }
         )
         with self._lock:
-            self._state.status = "running" if self._state.is_running else "online"
+            self._state.status = (
+                "running"
+                if self._state.is_running
+                else "recording"
+                if self._state.is_recording
+                else "online"
+            )
             self._state.last_error = None

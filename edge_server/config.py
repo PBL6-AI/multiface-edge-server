@@ -13,6 +13,7 @@ class EdgeServerConfig:
     control_base_url: str = os.getenv("CONTROL_BASE_URL", "http://localhost:5000")
     stream_base_url: str = os.getenv("STREAM_BASE_URL", "rtsp://localhost:8554")
     default_stream_path: str = os.getenv("DEFAULT_STREAM_PATH", "attendance")
+    recordings_dir: str = os.getenv("RECORDINGS_DIR", "recordings")
     mediamtx_binary: str = os.getenv("MEDIAMTX_BINARY", "mediamtx")
     mediamtx_config: str = os.getenv("MEDIAMTX_CONFIG", "")
     libcamera_binary: str = os.getenv("LIBCAMERA_BINARY", "libcamera-vid")
