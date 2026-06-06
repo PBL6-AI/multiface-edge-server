@@ -61,26 +61,14 @@ class RtspPublisher:
         self._runtime.camera_binary = camera_binary
         self._start_mediamtx_if_needed()
         stream_url = self._build_stream_url(stream_path)
-        command = self._build_publish_command(stream_url, camera_binary)
-        logger.info("Starting RTSP publisher command: %s", shlex.join(command))
-        self._runtime.publisher_process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            shell=False,
-            start_new_session=True,
-        )
-        time.sleep(self._config.process_start_grace_seconds)
-        if self._runtime.publisher_process.poll() is not None:
-            process = self._runtime.publisher_process
-            stdout, stderr = process.communicate(timeout=1)
-            self._terminate_process(process, process_group=True)
-            self._runtime.publisher_process = None
-            raise RuntimeError(
-                "RTSP publisher exited during startup"
-                f" | stdout={stdout.strip()[:500]} | stderr={stderr.strip()[:500]}"
+        if not self._start_publisher(stream_url, camera_binary, low_latency=True):
+            logger.warning(
+                "Low-latency RTSP publisher failed during startup; retrying with "
+                "the stable publisher command."
             )
+            if not self._start_publisher(stream_url, camera_binary, low_latency=False):
+                raise RuntimeError("RTSP publisher exited during startup")
+
         self._runtime.stream_url = stream_url
         return stream_url
 
@@ -137,7 +125,49 @@ class RtspPublisher:
     def _build_stream_url(self, stream_path: str) -> str:
         return f"{self._config.stream_base_url.rstrip('/')}/{stream_path}"
 
-    def _build_publish_command(self, stream_url: str, camera_binary: str) -> list[str]:
+    def _start_publisher(
+        self,
+        stream_url: str,
+        camera_binary: str,
+        low_latency: bool,
+    ) -> bool:
+        command = self._build_publish_command(
+            stream_url,
+            camera_binary,
+            low_latency=low_latency,
+        )
+        mode = "low-latency" if low_latency else "stable"
+        logger.info("Starting %s RTSP publisher command: %s", mode, shlex.join(command))
+        self._runtime.publisher_process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False,
+            start_new_session=True,
+        )
+        time.sleep(self._config.process_start_grace_seconds)
+        if self._runtime.publisher_process.poll() is None:
+            return True
+
+        process = self._runtime.publisher_process
+        stdout, stderr = process.communicate(timeout=1)
+        self._terminate_process(process, process_group=True)
+        self._runtime.publisher_process = None
+        logger.error(
+            "%s RTSP publisher exited during startup | stdout=%s | stderr=%s",
+            mode,
+            stdout.strip()[:2000],
+            stderr.strip()[:4000],
+        )
+        return False
+
+    def _build_publish_command(
+        self,
+        stream_url: str,
+        camera_binary: str,
+        low_latency: bool = True,
+    ) -> list[str]:
         camera_cmd = [
             camera_binary,
             "--inline",
@@ -152,39 +182,36 @@ class RtspPublisher:
             str(self._config.target_fps),
             "--codec",
             "h264",
-            "--intra",
-            str(self._config.target_fps),
             "-o",
             "-",
         ]
+        if low_latency:
+            camera_cmd[-2:-2] = ["--intra", str(self._config.target_fps)]
 
-        ffmpeg = [
-            self._resolve_binary(self._config.ffmpeg_binary),
-            "-fflags",
-            "nobuffer",
-            "-flags",
-            "low_delay",
-            "-probesize",
-            "32",
-            "-analyzeduration",
-            "0",
-            "-i",
-            "-",
-            "-an",
-            "-c:v",
-            "copy",
-            "-flush_packets",
-            "1",
-            "-f",
-            "rtsp",
-            "-rtsp_transport",
-            "tcp",
-            "-muxdelay",
-            "0",
-            "-muxpreload",
-            "0",
-            stream_url,
-        ]
+        ffmpeg = [self._resolve_binary(self._config.ffmpeg_binary)]
+        if low_latency:
+            ffmpeg.extend(
+                [
+                    "-fflags",
+                    "nobuffer",
+                    "-flags",
+                    "low_delay",
+                    "-probesize",
+                    "32",
+                    "-analyzeduration",
+                    "0",
+                ]
+            )
+        else:
+            ffmpeg.append("-re")
+
+        ffmpeg.extend(["-i", "-", "-an", "-c:v", "copy"])
+        if low_latency:
+            ffmpeg.extend(["-flush_packets", "1"])
+        ffmpeg.extend(["-f", "rtsp", "-rtsp_transport", "tcp"])
+        if low_latency:
+            ffmpeg.extend(["-muxdelay", "0", "-muxpreload", "0"])
+        ffmpeg.append(stream_url)
 
         return [
             "/bin/bash",
