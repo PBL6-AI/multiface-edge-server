@@ -122,6 +122,13 @@ class RtspPublisher:
             stdout, stderr = process.communicate(timeout=1)
             self._terminate_process(process, process_group=True)
             self._runtime.mediamtx_process = None
+            combined_output = f"{stdout}\n{stderr}".lower()
+            if "address already in use" in combined_output:
+                logger.warning(
+                    "mediamtx port is already in use; assuming an existing MediaMTX "
+                    "instance will serve the RTSP stream."
+                )
+                return
             raise RuntimeError(
                 "mediamtx exited during startup"
                 f" | stdout={stdout.strip()[:500]} | stderr={stderr.strip()[:500]}"
