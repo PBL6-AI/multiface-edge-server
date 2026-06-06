@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import shlex
 import shutil
 import subprocess
@@ -67,10 +69,13 @@ class RtspPublisher:
             stderr=subprocess.PIPE,
             text=True,
             shell=False,
+            start_new_session=True,
         )
         time.sleep(self._config.process_start_grace_seconds)
         if self._runtime.publisher_process.poll() is not None:
-            stdout, stderr = self._runtime.publisher_process.communicate(timeout=1)
+            process = self._runtime.publisher_process
+            stdout, stderr = process.communicate(timeout=1)
+            self._terminate_process(process, process_group=True)
             self._runtime.publisher_process = None
             raise RuntimeError(
                 "RTSP publisher exited during startup"
@@ -80,13 +85,14 @@ class RtspPublisher:
         return stream_url
 
     def stop(self) -> None:
-        self._terminate_process(self._runtime.publisher_process)
+        self._terminate_process(self._runtime.publisher_process, process_group=True)
         self._runtime.publisher_process = None
         self._runtime.stream_url = None
+        time.sleep(0.5)
 
     def stop_all(self) -> None:
         self.stop()
-        self._terminate_process(self._runtime.mediamtx_process)
+        self._terminate_process(self._runtime.mediamtx_process, process_group=True)
         self._runtime.mediamtx_process = None
 
     def _start_mediamtx_if_needed(self) -> None:
@@ -108,10 +114,13 @@ class RtspPublisher:
             stderr=subprocess.PIPE,
             text=True,
             shell=False,
+            start_new_session=True,
         )
         time.sleep(self._config.process_start_grace_seconds)
         if self._runtime.mediamtx_process.poll() is not None:
-            stdout, stderr = self._runtime.mediamtx_process.communicate(timeout=1)
+            process = self._runtime.mediamtx_process
+            stdout, stderr = process.communicate(timeout=1)
+            self._terminate_process(process, process_group=True)
             self._runtime.mediamtx_process = None
             raise RuntimeError(
                 "mediamtx exited during startup"
@@ -211,12 +220,39 @@ class RtspPublisher:
         )
 
     @staticmethod
-    def _terminate_process(process: Optional[subprocess.Popen]) -> None:
+    def _terminate_process(
+        process: Optional[subprocess.Popen],
+        process_group: bool = False,
+    ) -> None:
         if process is None:
             return
-        if process.poll() is None:
-            process.terminate()
+
+        if process_group and os.name != "nt":
             try:
-                process.wait(timeout=5)
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                logger.warning("Failed to terminate process group %s: %s", process.pid, exc)
+        elif process.poll() is None:
+            process.terminate()
+
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+
+        if process_group and os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                logger.warning("Failed to kill process group %s: %s", process.pid, exc)
+        else:
+            process.kill()
+            try:
+                process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                process.kill()
+                logger.warning("Process %s did not exit after kill.", process.pid)
