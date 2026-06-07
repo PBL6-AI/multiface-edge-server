@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import shlex
 import shutil
 import subprocess
@@ -59,34 +61,26 @@ class RtspPublisher:
         self._runtime.camera_binary = camera_binary
         self._start_mediamtx_if_needed()
         stream_url = self._build_stream_url(stream_path)
-        command = self._build_publish_command(stream_url, camera_binary)
-        logger.info("Starting RTSP publisher command: %s", shlex.join(command))
-        self._runtime.publisher_process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            shell=False,
-        )
-        time.sleep(self._config.process_start_grace_seconds)
-        if self._runtime.publisher_process.poll() is not None:
-            stdout, stderr = self._runtime.publisher_process.communicate(timeout=1)
-            self._runtime.publisher_process = None
-            raise RuntimeError(
-                "RTSP publisher exited during startup"
-                f" | stdout={stdout.strip()[:500]} | stderr={stderr.strip()[:500]}"
+        if not self._start_publisher(stream_url, camera_binary, low_latency=True):
+            logger.warning(
+                "Low-latency RTSP publisher failed during startup; retrying with "
+                "the stable publisher command."
             )
+            if not self._start_publisher(stream_url, camera_binary, low_latency=False):
+                raise RuntimeError("RTSP publisher exited during startup")
+
         self._runtime.stream_url = stream_url
         return stream_url
 
     def stop(self) -> None:
-        self._terminate_process(self._runtime.publisher_process)
+        self._terminate_process(self._runtime.publisher_process, process_group=True)
         self._runtime.publisher_process = None
         self._runtime.stream_url = None
+        time.sleep(0.5)
 
     def stop_all(self) -> None:
         self.stop()
-        self._terminate_process(self._runtime.mediamtx_process)
+        self._terminate_process(self._runtime.mediamtx_process, process_group=True)
         self._runtime.mediamtx_process = None
 
     def _start_mediamtx_if_needed(self) -> None:
@@ -108,11 +102,21 @@ class RtspPublisher:
             stderr=subprocess.PIPE,
             text=True,
             shell=False,
+            start_new_session=True,
         )
         time.sleep(self._config.process_start_grace_seconds)
         if self._runtime.mediamtx_process.poll() is not None:
-            stdout, stderr = self._runtime.mediamtx_process.communicate(timeout=1)
+            process = self._runtime.mediamtx_process
+            stdout, stderr = process.communicate(timeout=1)
+            self._terminate_process(process, process_group=True)
             self._runtime.mediamtx_process = None
+            combined_output = f"{stdout}\n{stderr}".lower()
+            if "address already in use" in combined_output:
+                logger.warning(
+                    "mediamtx port is already in use; assuming an existing MediaMTX "
+                    "instance will serve the RTSP stream."
+                )
+                return
             raise RuntimeError(
                 "mediamtx exited during startup"
                 f" | stdout={stdout.strip()[:500]} | stderr={stderr.strip()[:500]}"
@@ -121,7 +125,49 @@ class RtspPublisher:
     def _build_stream_url(self, stream_path: str) -> str:
         return f"{self._config.stream_base_url.rstrip('/')}/{stream_path}"
 
-    def _build_publish_command(self, stream_url: str, camera_binary: str) -> list[str]:
+    def _start_publisher(
+        self,
+        stream_url: str,
+        camera_binary: str,
+        low_latency: bool,
+    ) -> bool:
+        command = self._build_publish_command(
+            stream_url,
+            camera_binary,
+            low_latency=low_latency,
+        )
+        mode = "low-latency" if low_latency else "stable"
+        logger.info("Starting %s RTSP publisher command: %s", mode, shlex.join(command))
+        self._runtime.publisher_process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False,
+            start_new_session=True,
+        )
+        time.sleep(self._config.process_start_grace_seconds)
+        if self._runtime.publisher_process.poll() is None:
+            return True
+
+        process = self._runtime.publisher_process
+        stdout, stderr = process.communicate(timeout=1)
+        self._terminate_process(process, process_group=True)
+        self._runtime.publisher_process = None
+        logger.error(
+            "%s RTSP publisher exited during startup | stdout=%s | stderr=%s",
+            mode,
+            stdout.strip()[:2000],
+            stderr.strip()[:4000],
+        )
+        return False
+
+    def _build_publish_command(
+        self,
+        stream_url: str,
+        camera_binary: str,
+        low_latency: bool = True,
+    ) -> list[str]:
         camera_cmd = [
             camera_binary,
             "--inline",
@@ -139,21 +185,33 @@ class RtspPublisher:
             "-o",
             "-",
         ]
+        if low_latency:
+            camera_cmd[-2:-2] = ["--intra", str(self._config.target_fps)]
 
-        ffmpeg = [
-            self._resolve_binary(self._config.ffmpeg_binary),
-            "-re",
-            "-i",
-            "-",
-            "-an",
-            "-c:v",
-            "copy",
-            "-f",
-            "rtsp",
-            "-rtsp_transport",
-            "tcp",
-            stream_url,
-        ]
+        ffmpeg = [self._resolve_binary(self._config.ffmpeg_binary)]
+        if low_latency:
+            ffmpeg.extend(
+                [
+                    "-fflags",
+                    "nobuffer",
+                    "-flags",
+                    "low_delay",
+                    "-probesize",
+                    "32",
+                    "-analyzeduration",
+                    "0",
+                ]
+            )
+        else:
+            ffmpeg.append("-re")
+
+        ffmpeg.extend(["-i", "-", "-an", "-c:v", "copy"])
+        if low_latency:
+            ffmpeg.extend(["-flush_packets", "1"])
+        ffmpeg.extend(["-f", "rtsp", "-rtsp_transport", "tcp"])
+        if low_latency:
+            ffmpeg.extend(["-muxdelay", "0", "-muxpreload", "0"])
+        ffmpeg.append(stream_url)
 
         return [
             "/bin/bash",
@@ -211,12 +269,39 @@ class RtspPublisher:
         )
 
     @staticmethod
-    def _terminate_process(process: Optional[subprocess.Popen]) -> None:
+    def _terminate_process(
+        process: Optional[subprocess.Popen],
+        process_group: bool = False,
+    ) -> None:
         if process is None:
             return
-        if process.poll() is None:
-            process.terminate()
+
+        if process_group and os.name != "nt":
             try:
-                process.wait(timeout=5)
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                logger.warning("Failed to terminate process group %s: %s", process.pid, exc)
+        elif process.poll() is None:
+            process.terminate()
+
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+
+        if process_group and os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                logger.warning("Failed to kill process group %s: %s", process.pid, exc)
+        else:
+            process.kill()
+            try:
+                process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                process.kill()
+                logger.warning("Process %s did not exit after kill.", process.pid)
