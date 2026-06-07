@@ -30,6 +30,8 @@ class EdgeRuntimeState:
     recording_file_path: Optional[str] = None
     recording_source: Optional[str] = None
     recording_started_at: Optional[str] = None
+    preview_stream_path: Optional[str] = None
+    preview_url: Optional[str] = None
 
 
 class CameraEdgeService:
@@ -72,6 +74,7 @@ class CameraEdgeService:
                 or self._config.camera_probe_binary
                 or self._config.rpicam_binary
                 or self._config.libcamera_binary,
+                "webrtcBaseUrl": self._config.webrtc_base_url,
             },
         }
         self._backend_client.register_device(payload)
@@ -112,6 +115,62 @@ class CameraEdgeService:
                 self._state.status = "error"
                 raise
 
+    def start_preview(self, stream_path: str | None = None) -> dict:
+        with self._lock:
+            if self._state.is_running and self._state.session_id is not None:
+                raise RuntimeError(
+                    f"Edge device is already running attendance session {self._state.session_id}"
+                )
+
+            resolved_path = (
+                stream_path
+                or f"{self._config.device_code}/enrollment-preview"
+            ).strip("/")
+            try:
+                stream_url = self._publisher.start(resolved_path)
+                self._state.is_running = True
+                self._state.session_id = None
+                self._state.camera_id = self._config.camera_id
+                self._state.stream_url = stream_url
+                self._state.preview_stream_path = resolved_path
+                self._state.preview_url = self._build_preview_url(resolved_path)
+                self._state.status = "previewing"
+                self._state.last_started_at = datetime.now(timezone.utc).isoformat()
+                self._state.last_error = None
+                self._ensure_heartbeat()
+                self._send_heartbeat(mode="previewing")
+                return {
+                    "status": "started",
+                    "streamUrl": stream_url,
+                    "previewUrl": self._state.preview_url,
+                    "streamPath": resolved_path,
+                    "cameraId": self._state.camera_id,
+                }
+            except Exception as exc:
+                self._state.last_error = str(exc)
+                self._state.status = "error"
+                raise
+
+    def stop_preview(self) -> dict:
+        with self._lock:
+            if self._state.session_id is not None:
+                raise RuntimeError(
+                    f"Cannot stop preview while attendance session {self._state.session_id} is running"
+                )
+
+            self._publisher.stop()
+            self._state.is_running = False
+            self._state.stream_url = None
+            self._state.preview_stream_path = None
+            self._state.preview_url = None
+            self._state.status = (
+                "online" if self._state.registration_succeeded else "idle"
+            )
+            self._state.last_error = None
+            self._ensure_heartbeat()
+            self._send_heartbeat(mode="preview_stopped")
+            return {"status": "stopped"}
+
     def stop(self, session_id: int) -> dict:
         with self._lock:
             if self._state.session_id not in (None, session_id):
@@ -139,6 +198,8 @@ class CameraEdgeService:
                 "sessionId": self._state.session_id,
                 "cameraId": self._state.camera_id,
                 "streamUrl": self._state.stream_url,
+                "previewUrl": self._state.preview_url,
+                "previewStreamPath": self._state.preview_stream_path,
                 "fps": self._state.fps,
                 "lastError": self._state.last_error,
                 "lastStartedAt": self._state.last_started_at,
@@ -242,6 +303,7 @@ class CameraEdgeService:
                     "lastError": snapshot["lastError"],
                     "fps": snapshot["fps"],
                     "recording": snapshot["recording"],
+                    "previewUrl": snapshot["previewUrl"],
                     "cameraBinary": self._publisher.camera_binary
                     or self._recorder.camera_binary
                     or self._config.camera_probe_binary
@@ -259,3 +321,8 @@ class CameraEdgeService:
                 else "online"
             )
             self._state.last_error = None
+
+    def _build_preview_url(self, stream_path: str) -> Optional[str]:
+        if not self._config.webrtc_base_url:
+            return None
+        return f"{self._config.webrtc_base_url.rstrip('/')}/{stream_path.strip('/')}/"

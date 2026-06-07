@@ -72,6 +72,27 @@ def create_app() -> Flask:
     def attendance_status():
         return jsonify(camera_edge_service.status()), 200
 
+    @app.post("/preview/start")
+    def start_preview():
+        payload = request.get_json(force=True, silent=True) or {}
+        try:
+            result = camera_edge_service.start_preview(
+                stream_path=payload.get("streamPath")
+            )
+            return jsonify(result), 200
+        except Exception as exc:
+            logger.exception("Failed to start enrollment preview")
+            return jsonify({"message": str(exc)}), 500
+
+    @app.post("/preview/stop")
+    def stop_preview():
+        try:
+            result = camera_edge_service.stop_preview()
+            return jsonify(result), 200
+        except Exception as exc:
+            logger.exception("Failed to stop enrollment preview")
+            return jsonify({"message": str(exc)}), 500
+
     @app.post("/recording/start")
     def start_recording():
         payload = request.get_json(force=True, silent=False) or {}

@@ -1,5 +1,18 @@
 import os
 from dataclasses import dataclass
+from urllib.parse import urlparse, urlunparse
+
+
+def _derive_webrtc_base_url(stream_base_url: str) -> str:
+    explicit = os.getenv("WEBRTC_BASE_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+
+    parsed = urlparse(stream_base_url)
+    if not parsed.hostname:
+        return ""
+
+    return urlunparse(("http", f"{parsed.hostname}:8889", "", "", "", "")).rstrip("/")
 
 
 @dataclass
@@ -12,6 +25,7 @@ class EdgeServerConfig:
     camera_id: str = os.getenv("CAMERA_ID", "cam-imx519-01")
     control_base_url: str = os.getenv("CONTROL_BASE_URL", "http://localhost:5000")
     stream_base_url: str = os.getenv("STREAM_BASE_URL", "rtsp://localhost:8554")
+    webrtc_base_url: str = _derive_webrtc_base_url(stream_base_url)
     default_stream_path: str = os.getenv("DEFAULT_STREAM_PATH", "attendance")
     recordings_dir: str = os.getenv("RECORDINGS_DIR", "recordings")
     mediamtx_binary: str = os.getenv("MEDIAMTX_BINARY", "mediamtx")
