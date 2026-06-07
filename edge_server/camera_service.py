@@ -95,10 +95,13 @@ class CameraEdgeService:
             stream_path = f"{self._config.device_code}/session-{session_id}"
             try:
                 stream_url = self._publisher.start(stream_path)
+                preview_url = self._build_preview_url(stream_path)
                 self._state.is_running = True
                 self._state.session_id = session_id
                 self._state.camera_id = camera_id or self._config.camera_id
                 self._state.stream_url = stream_url
+                self._state.preview_stream_path = stream_path
+                self._state.preview_url = preview_url
                 self._state.status = "running"
                 self._state.last_started_at = datetime.now(timezone.utc).isoformat()
                 self._state.last_error = None
@@ -107,6 +110,7 @@ class CameraEdgeService:
                 return {
                     "status": "started",
                     "streamUrl": stream_url,
+                    "previewUrl": preview_url,
                     "cameraId": self._state.camera_id,
                     "sessionId": session_id,
                 }
@@ -182,6 +186,8 @@ class CameraEdgeService:
             self._state.is_running = False
             self._state.session_id = None
             self._state.stream_url = None
+            self._state.preview_stream_path = None
+            self._state.preview_url = None
             self._state.status = (
                 "online" if self._state.registration_succeeded else "idle"
             )
